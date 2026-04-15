@@ -170,7 +170,7 @@
                     // セグメントの移動先を訪問済みとして追加
                     segment.slice(1).forEach(p => {
                         globalVisited.add(`${p.r},${p.c}`);
-                        // ワープした場合、入口（via）も通過したものとする
+                        // ワープした場合、入り口（via）も通過したものとする
                         if (p.jump && p.via) {
                             globalVisited.add(`${p.via.r},${p.via.c}`);
                         }
@@ -372,26 +372,34 @@
 
                 // 2. 指定マスの既存属性をチェック
                 const existingWarp = warps.find((w, idx) => {
-                    // ドラッグ中のワープ端点自体は無視する
+                    // 現在ドラッグ中の自分自身の特定の端点（AまたはB）は衝突判定から除外する
                     const isSelfA = dragging?.type === 'warp' && dragging?.warpIdx === idx && dragging?.end === 'a';
                     const isSelfB = dragging?.type === 'warp' && dragging?.warpIdx === idx && dragging?.end === 'b';
-                    if (isSelfA || isSelfB) return false;
-                    return (w.a.r === r && w.a.c === c) || (w.b.r === r && w.b.c === c);
+                    
+                    const isTargetA = w.a.r === r && w.a.c === c;
+                    const isTargetB = w.b.r === r && w.b.c === c;
+
+                    if (!isTargetA && !isTargetB) return false;
+                    if (isSelfA && isTargetA) return false;
+                    if (isSelfB && isTargetB) return false;
+
+                    return true;
                 });
                 
                 // ワープマスへの重ね合わせルール
                 if (existingWarp) {
-                    if (type === 'start' || type === 'goal' || type === 'warp') return false; // 壁, S, G, Warpは不可。CPは可
+                    if (type === 'start' || type === 'goal' || type === 'warp') return false; 
                 }
 
                 // 3. 同一ペア内の排他ルール (S, G, CPはどれか1つ)
-                const p = pairs[pairIdx];
-                // ドラッグ中の自分自身の位置との衝突は無視
-                const isConflictS = p.start?.r === r && p.start?.c === c && !(dragging?.type === 'start' && dragging?.pairIdx === pairIdx);
-                const isConflictG = p.goal?.r === r && p.goal?.c === c && !(dragging?.type === 'goal' && dragging?.pairIdx === pairIdx);
-                const isConflictCP = p.requiredCells.some(cp => cp.r === r && cp.c === c && !(dragging?.type === 'cp' && dragging?.pairIdx === pairIdx && dragging?.r === r && dragging?.c === c));
-                
-                if (isConflictS || isConflictG || isConflictCP) return false;
+                if (pairIdx !== undefined && pairs[pairIdx]) {
+                    const p = pairs[pairIdx];
+                    const isConflictS = p.start?.r === r && p.start?.c === c && !(dragging?.type === 'start' && dragging?.pairIdx === pairIdx);
+                    const isConflictG = p.goal?.r === r && p.goal?.c === c && !(dragging?.type === 'goal' && dragging?.pairIdx === pairIdx);
+                    const isConflictCP = p.requiredCells.some(cp => cp.r === r && cp.c === c && !(dragging?.type === 'cp' && dragging?.pairIdx === pairIdx && dragging?.r === r && dragging?.c === c));
+                    
+                    if (isConflictS || isConflictG || isConflictCP) return false;
+                }
 
                 return true;
             };
@@ -438,7 +446,7 @@
                 const nextGrid = [...grid.map(row => [...row])];
                 const nextPairs = [...pairs.map(p => ({ ...p, requiredCells: [...p.requiredCells] }))];
                 const nextWarps = [...warps];
-                const activeIdx = from ? from.pairIdx : activePairIdx;
+                const activeIdx = from ? (from.pairIdx !== undefined ? from.pairIdx : activePairIdx) : activePairIdx;
 
                 // 配置可能かチェック
                 if (!canPlaceAttribute(type, r, c, activeIdx, from)) {
@@ -540,7 +548,6 @@
                     const cellEl = elements.find(el => el.dataset.cellPos);
                     if (cellEl) {
                         const [r, c] = cellEl.dataset.cellPos.split(',').map(Number);
-                        // 位置が変わった場合、または移動不可でない場合に移動を実行
                         setAttribute(draggedAttr.type, r, c, draggedAttr);
                     }
                     setDraggedAttr(null);
@@ -839,7 +846,7 @@
                             <div className="flex items-center gap-4 opacity-70 tracking-tighter">
                                 <span>SIZE: {dim.w}x{dim.h}</span>
                                 <span>ZOOM: {Math.round(viewTransform.scale * 100)}%</span>
-                                <span>v3.1 Stable</span>
+                                <span>v3.2 Stable</span>
                             </div>
                         </footer>
                     </div>
