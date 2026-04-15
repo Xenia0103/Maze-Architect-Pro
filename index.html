@@ -1,0 +1,520 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Maze Architect Pro</title>
+    <!-- React & ReactDOM -->
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <!-- Babel for JSX -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <style>
+        body { margin: 0; padding: 0; overflow: hidden; }
+        .no-select { user-select: none; }
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useCallback, useRef } = React;
+
+        // --- Lucide Icon Helper ---
+        // React component to render Lucide icons using the global lucide object
+        const Icon = ({ name, size = 16, className = "", fill = "none" }) => {
+            const iconRef = useRef(null);
+            useEffect(() => {
+                if (iconRef.current) {
+                    lucide.createIcons({
+                        targets: [iconRef.current],
+                        icons: { [name]: lucide.icons[name] },
+                        attrs: { 
+                            stroke: "currentColor", 
+                            "stroke-width": 2, 
+                            fill: fill,
+                            width: size, 
+                            height: size 
+                        }
+                    });
+                }
+            }, [name, size, fill]);
+            return <i ref={iconRef} data-lucide={name} className={className}></i>;
+        };
+
+        // --- Constants ---
+        const COLORS = ['#ef4444', '#3b82f6', '#10b981', '#f59e0b', '#8b5cf6', '#ec4899', '#06b6d4', '#84cc16', '#f97316', '#6366f1'];
+        const MOVE_RULES = { FREE: '自由移動', ICE: '氷マス', LEFT_ONLY: '左折のみ', RIGHT_ONLY: '右折のみ' };
+        const PATH_MODES = { SHORTEST: '最短経路', LONGEST: '最長経路', ALL_CELLS: '全マス通過' };
+        const TOOLS = { CURSOR: 'cursor', CELL_WALL: 'cell_wall', BORDER_WALL: 'border_wall', START: 'start', GOAL: 'goal', CHECKPOINT: 'checkpoint', WARP: 'warp', SELECT: 'select' };
+
+        // --- Solver Engine ---
+        class MazeSolver {
+            constructor(grid, hWalls, vWalls, pairs, warps, options) {
+                this.grid = grid; this.hWalls = hWalls; this.vWalls = vWalls;
+                this.pairs = pairs; this.warps = warps; this.options = options;
+                this.height = grid.length; this.width = grid[0].length;
+            }
+            isWall(r, c) {
+                if (r < 0 || r >= this.height || c < 0 || c >= this.width) return true;
+                return this.grid[r][c].isWall;
+            }
+            hasBorder(r1, c1, r2, c2) {
+                if (r1 === r2) { const minC = Math.min(c1, c2); return this.vWalls[r1][minC + 1]; }
+                else { const minR = Math.min(r1, r2); return this.hWalls[minR + 1][c1]; }
+            }
+            getWarp(r, c) {
+                for (const warp of this.warps) {
+                    if (warp.a.r === r && warp.a.c === c) return warp.b;
+                    if (warp.b.r === r && warp.b.c === c) return warp.a;
+                }
+                return null;
+            }
+            solve() {
+                const results = {};
+                for (const pair of this.pairs) { if (!pair.start || !pair.goal) continue; results[pair.id] = this.solvePair(pair); }
+                return results;
+            }
+            solvePair(pair) {
+                const { start, goal, requiredCells, mode, moveRule } = pair;
+                const limit = this.options.maxSolutions || 5;
+                if (mode === PATH_MODES.SHORTEST) {
+                    const path = this.findShortestPathSequence(start, goal, requiredCells, moveRule);
+                    return path ? [path] : [];
+                } else {
+                    let solutions = [];
+                    this.dfs(start, goal, requiredCells, moveRule, mode, [], new Set(), solutions, limit);
+                    return solutions;
+                }
+            }
+            findShortestPathSequence(start, goal, cps, moveRule) {
+                let currentPos = { ...start, dir: null };
+                let fullPath = [currentPos];
+                const points = [...cps, goal];
+                for (const target of points) {
+                    const segment = this.bfs(currentPos, target, moveRule);
+                    if (!segment) return null;
+                    fullPath.push(...segment.slice(1));
+                    currentPos = fullPath[fullPath.length - 1];
+                }
+                return fullPath;
+            }
+            bfs(start, target, moveRule) {
+                const queue = [[{ ...start, dir: null }]];
+                const visited = new Set();
+                visited.add(`${start.r},${start.c},null`);
+                while (queue.length > 0) {
+                    const path = queue.shift();
+                    const curr = path[path.length - 1];
+                    if (curr.r === target.r && curr.c === target.c) return path;
+                    const neighbors = this.getNeighbors(curr, moveRule);
+                    for (const next of neighbors) {
+                        const key = `${next.r},${next.c},${next.dir}`;
+                        if (!visited.has(key)) { visited.add(key); queue.push([...path, next]); }
+                    }
+                }
+                return null;
+            }
+            dfs(curr, goal, cps, moveRule, mode, path, visited, solutions, limit) {
+                if (solutions.length >= limit) return;
+                const newPath = [...path, curr];
+                const posKey = `${curr.r},${curr.c}`;
+                if (curr.r === goal.r && curr.c === goal.c) {
+                    const allCpsVisited = cps.every(cp => newPath.some(p => p.r === cp.r && p.c === cp.c));
+                    const allCellsVisited = mode === PATH_MODES.ALL_CELLS ? this.checkAllCells(newPath) : true;
+                    if (allCpsVisited && allCellsVisited) solutions.push(newPath);
+                    return;
+                }
+                visited.add(posKey);
+                const neighbors = this.getNeighbors(curr, moveRule);
+                for (const next of neighbors) {
+                    if (!visited.has(`${next.r},${next.c}`)) {
+                        this.dfs(next, goal, cps, moveRule, mode, newPath, visited, solutions, limit);
+                    }
+                }
+                visited.delete(posKey);
+            }
+            checkAllCells(path) {
+                const pathSet = new Set(path.map(p => `${p.r},${p.c}`));
+                for (let r = 0; r < this.height; r++) {
+                    for (let c = 0; c < this.width; c++) {
+                        if (!this.grid[r][c].isWall && !pathSet.has(`${r},${c}`)) return false;
+                    }
+                }
+                return true;
+            }
+            getNeighbors(curr, moveRule) {
+                const dirs = [{ dr: -1, dc: 0, name: 'up' }, { dr: 1, dc: 0, name: 'down' }, { dr: 0, dc: -1, name: 'left' }, { dr: 0, dc: 1, name: 'right' }];
+                let possibleDirs = dirs;
+                if (moveRule === MOVE_RULES.LEFT_ONLY && curr.dir) {
+                    const leftMap = { up: 'left', down: 'right', left: 'down', right: 'up' };
+                    possibleDirs = dirs.filter(d => d.name === curr.dir || d.name === leftMap[curr.dir]);
+                } else if (moveRule === MOVE_RULES.RIGHT_ONLY && curr.dir) {
+                    const rightMap = { up: 'right', down: 'left', left: 'up', right: 'down' };
+                    possibleDirs = dirs.filter(d => d.name === curr.dir || d.name === rightMap[curr.dir]);
+                }
+                const neighbors = [];
+                for (const d of possibleDirs) {
+                    let nr = curr.r + d.dr;
+                    let nc = curr.c + d.dc;
+                    if (this.isWall(nr, nc) || this.hasBorder(curr.r, curr.c, nr, nc)) continue;
+                    if (moveRule === MOVE_RULES.ICE) {
+                        let lastR = nr, lastC = nc;
+                        while (true) {
+                            let nextR = lastR + d.dr, nextC = lastC + d.dc;
+                            if (this.isWall(nextR, nextC) || this.hasBorder(lastR, lastC, nextR, nextC)) break;
+                            lastR = nextR; lastC = nextC;
+                        }
+                        nr = lastR; nc = lastC;
+                    }
+                    const warpDest = this.getWarp(nr, nc);
+                    if (warpDest) neighbors.push({ r: warpDest.r, c: warpDest.c, dir: d.name });
+                    else neighbors.push({ r: nr, c: nc, dir: d.name });
+                }
+                return neighbors;
+            }
+        }
+
+        // --- Main App ---
+        function App() {
+            const [grid, setGrid] = useState([]);
+            const [hWalls, setHWalls] = useState([]);
+            const [vWalls, setVWalls] = useState([]);
+            const [pairs, setPairs] = useState([{ id: Date.now(), start: null, goal: null, requiredCells: [], color: COLORS[0], mode: PATH_MODES.SHORTEST, moveRule: MOVE_RULES.FREE }]);
+            const [activePairIdx, setActivePairIdx] = useState(0);
+            const [warps, setWarps] = useState([]);
+            const [activeTool, setActiveTool] = useState(TOOLS.CELL_WALL);
+            const [solverOptions, setSolverOptions] = useState({ maxSolutions: 5 });
+            const [solutions, setSolutions] = useState({});
+            const [statusMsg, setStatusMsg] = useState('');
+            const [isSidebarOpen, setIsSidebarOpen] = useState(true);
+            const [dim, setDim] = useState({ w: 10, h: 10 });
+            const [targetDim, setTargetDim] = useState({ w: 10, h: 10 });
+            const [history, setHistory] = useState([]);
+            const [historyIdx, setHistoryIdx] = useState(-1);
+            const [viewTransform, setViewTransform] = useState({ x: 0, y: 0, scale: 1 });
+            const [isPanning, setIsPanning] = useState(false);
+            const [panStart, setPanStart] = useState({ x: 0, y: 0 });
+            const [isDragging, setIsDragging] = useState(false);
+            const [dragMode, setDragMode] = useState(null);
+            const [pendingWarp, setPendingWarp] = useState(null);
+            const [selection, setSelection] = useState(null);
+            const [isSelecting, setIsSelecting] = useState(false);
+            const gridRef = useRef(null);
+            const workspaceRef = useRef(null);
+
+            useEffect(() => { resetMaze(10, 10, true); }, []);
+
+            const saveHistory = useCallback((currentData) => {
+                const snapshot = JSON.stringify(currentData || { grid, hWalls, vWalls, pairs, warps, dim });
+                const newHistory = history.slice(0, historyIdx + 1);
+                newHistory.push(snapshot);
+                if (newHistory.length > 50) newHistory.shift();
+                setHistory(newHistory);
+                setHistoryIdx(newHistory.length - 1);
+            }, [grid, hWalls, vWalls, pairs, warps, dim, history, historyIdx]);
+
+            const undo = () => {
+                if (historyIdx > 0) {
+                    const prevState = JSON.parse(history[historyIdx - 1]);
+                    setGrid(prevState.grid); setHWalls(prevState.hWalls); setVWalls(prevState.vWalls);
+                    setPairs(prevState.pairs); setWarps(prevState.warps); setDim(prevState.dim); setTargetDim(prevState.dim);
+                    setHistoryIdx(historyIdx - 1); setSolutions({});
+                }
+            };
+
+            const redo = () => {
+                if (historyIdx < history.length - 1) {
+                    const nextState = JSON.parse(history[historyIdx + 1]);
+                    setGrid(nextState.grid); setHWalls(nextState.hWalls); setVWalls(nextState.vWalls);
+                    setPairs(nextState.pairs); setWarps(nextState.warps); setDim(nextState.dim); setTargetDim(nextState.dim);
+                    setHistoryIdx(historyIdx + 1); setSolutions({});
+                }
+            };
+
+            const resetMaze = (w, h, skipHistory = false) => {
+                const newGrid = Array(h).fill(0).map(() => Array(w).fill(0).map(() => ({ isWall: false })));
+                const newHWalls = Array(h + 1).fill(0).map(() => Array(w).fill(false));
+                const newVWalls = Array(h).fill(0).map(() => Array(w + 1).fill(false));
+                const newPairs = [{ id: Date.now(), start: null, goal: null, requiredCells: [], color: COLORS[0], mode: PATH_MODES.SHORTEST, moveRule: MOVE_RULES.FREE }];
+                setGrid(newGrid); setHWalls(newHWalls); setVWalls(newVWalls); setPairs(newPairs); setWarps([]);
+                setSolutions({}); setDim({ w, h }); setTargetDim({ w, h }); setSelection(null); setViewTransform({ x: 0, y: 0, scale: 1 });
+                if (!skipHistory) saveHistory({ grid: newGrid, hWalls: newHWalls, vWalls: newVWalls, pairs: newPairs, warps: [], dim: { w, h } });
+                else { setHistory([JSON.stringify({ grid: newGrid, hWalls: newHWalls, vWalls: newVWalls, pairs: newPairs, warps: [], dim: { w, h } })]); setHistoryIdx(0); }
+            };
+
+            const applyResize = () => {
+                const { w: newW, h: newH } = targetDim; const oldW = dim.w, oldH = dim.h;
+                const newGrid = Array(newH).fill(0).map((_, r) => Array(newW).fill(0).map((_, c) => (r < oldH && c < oldW) ? { ...grid[r][c] } : { isWall: false }));
+                const newHWalls = Array(newH + 1).fill(0).map((_, r) => Array(newW).fill(0).map((_, c) => (r <= oldH && c < oldW) ? hWalls[r][c] : false));
+                const newVWalls = Array(newH).fill(0).map((_, r) => Array(newW + 1).fill(0).map((_, c) => (r < oldH && c <= oldW) ? vWalls[r][c] : false));
+                const filterOOB = (p) => p && p.r < newH && p.c < newW;
+                const newPairs = pairs.map(p => ({ ...p, start: filterOOB(p.start) ? p.start : null, goal: filterOOB(p.goal) ? p.goal : null, requiredCells: p.requiredCells.filter(filterOOB) }));
+                const newWarps = warps.filter(w => filterOOB(w.a) && filterOOB(w.b));
+                setGrid(newGrid); setHWalls(newHWalls); setVWalls(newVWalls); setPairs(newPairs); setWarps(newWarps); setDim({ w: newW, h: newH });
+                setSolutions({}); saveHistory({ grid: newGrid, hWalls: newHWalls, vWalls: newVWalls, pairs: newPairs, warps: newWarps, dim: { w: newW, h: newH } });
+            };
+
+            const isOccupied = (r, c) => {
+                return pairs.some(p => (p.start?.r === r && p.start?.c === c) || (p.goal?.r === r && p.goal?.c === c) || p.requiredCells.some(cp => cp.r === r && cp.c === c)) ||
+                       warps.some(w => (w.a.r === r && w.a.c === c) || (w.b.r === r && w.b.c === c));
+            };
+
+            const clearCellAttributes = (r, c, updatedPairs, updatedWarps) => {
+                updatedPairs.forEach(p => {
+                    if (p.start?.r === r && p.start?.c === c) p.start = null;
+                    if (p.goal?.r === r && p.goal?.c === c) p.goal = null;
+                    p.requiredCells = p.requiredCells.filter(cp => cp.r !== r || cp.c !== c);
+                });
+                const warpIdx = updatedWarps.findIndex(w => (w.a.r === r && w.a.c === c) || (w.b.r === r && w.b.c === c));
+                if (warpIdx !== -1) updatedWarps.splice(warpIdx, 1);
+            };
+
+            const handleCellInteraction = (r, c, isInitial = false) => {
+                if (r < 0 || r >= dim.h || c < 0 || c >= dim.w) return;
+                const newGrid = [...grid.map(row => [...row])];
+                const newPairs = [...pairs.map(p => ({ ...p, requiredCells: [...p.requiredCells] }))];
+                const newWarps = [...warps];
+                const currentPair = newPairs[activePairIdx];
+                if (dragMode === 'delete_all') {
+                    newGrid[r][c].isWall = false; clearCellAttributes(r, c, newPairs, newWarps);
+                    setGrid(newGrid); setPairs(newPairs); setWarps(newWarps); return;
+                }
+                if (activeTool === TOOLS.CELL_WALL) {
+                    if (isOccupied(r, c)) return;
+                    if (isInitial) { const mode = grid[r][c].isWall ? 'remove' : 'add'; setDragMode(mode); newGrid[r][c].isWall = mode === 'add'; }
+                    else if (dragMode) { newGrid[r][c].isWall = dragMode === 'add'; }
+                    setGrid(newGrid);
+                } else if (isInitial) {
+                    switch (activeTool) {
+                        case TOOLS.START: newGrid[r][c].isWall = false; clearCellAttributes(r, c, newPairs, newWarps); currentPair.start = { r, c }; break;
+                        case TOOLS.GOAL: newGrid[r][c].isWall = false; clearCellAttributes(r, c, newPairs, newWarps); currentPair.goal = { r, c }; break;
+                        case TOOLS.CHECKPOINT:
+                            const exists = currentPair.requiredCells.find(cp => cp.r === r && cp.c === c);
+                            if (exists) currentPair.requiredCells = currentPair.requiredCells.filter(cp => cp.r !== r || cp.c !== c);
+                            else { newGrid[r][c].isWall = false; clearCellAttributes(r, c, newPairs, newWarps); currentPair.requiredCells.push({ r, c }); }
+                            break;
+                        case TOOLS.WARP:
+                            if (!pendingWarp) setPendingWarp({ r, c });
+                            else {
+                                if (pendingWarp.r === r && pendingWarp.c === c) setPendingWarp(null);
+                                else { newGrid[r][c].isWall = false; clearCellAttributes(r, c, newPairs, newWarps); clearCellAttributes(pendingWarp.r, pendingWarp.c, newPairs, newWarps);
+                                newGrid[pendingWarp.r][pendingWarp.c].isWall = false; newWarps.push({ a: pendingWarp, b: { r, c }, id: Date.now() }); setPendingWarp(null); }
+                            }
+                            break;
+                    }
+                    setGrid(newGrid); setPairs(newPairs); setWarps(newWarps);
+                }
+            };
+
+            const handleWallInteraction = (type, r, c, isInitial = false) => {
+                if (activeTool !== TOOLS.BORDER_WALL) return;
+                const walls = type === 'h' ? hWalls : vWalls;
+                const setWalls = type === 'h' ? setHWalls : setVWalls;
+                if (isInitial) { const mode = walls[r][c] ? 'remove' : 'add'; setDragMode(mode); const next = [...walls.map(row => [...row])]; next[r][c] = mode === 'add'; setWalls(next); }
+                else if (dragMode) { const next = [...walls.map(row => [...row])]; next[r][c] = dragMode === 'add'; setWalls(next); }
+            };
+
+            const handleWheel = (e) => {
+                if (e.ctrlKey) { e.preventDefault(); const scaleDelta = e.deltaY > 0 ? 0.9 : 1.1; const newScale = Math.min(Math.max(viewTransform.scale * scaleDelta, 0.2), 4); setViewTransform(prev => ({ ...prev, scale: newScale })); }
+                else { setViewTransform(prev => ({ ...prev, y: prev.y - e.deltaY })); }
+            };
+
+            const handleWorkspaceMouseDown = (e) => { if (e.target === workspaceRef.current || e.button === 0 && !e.shiftKey && activeTool === TOOLS.CURSOR) { setIsPanning(true); setPanStart({ x: e.clientX - viewTransform.x, y: e.clientY - viewTransform.y }); } };
+            const handleWorkspaceMouseMove = (e) => { if (isPanning) { setViewTransform(prev => ({ ...prev, x: e.clientX - panStart.x, y: e.clientY - panStart.y })); } };
+            const handleWorkspaceMouseUp = () => { setIsPanning(false); };
+
+            const getCellContent = (r, c) => {
+                const els = [];
+                pairs.forEach((p, idx) => {
+                    if (p.start?.r === r && p.start?.c === c) els.push(<div key={`s-${idx}`} className="w-6 h-6 rounded-full border-2 border-white shadow flex items-center justify-center text-[9px] font-black text-white z-20" style={{backgroundColor: p.color}}>S{idx+1}</div>);
+                    if (p.goal?.r === r && p.goal?.c === c) els.push(<div key={`g-${idx}`} className="w-6 h-6 rounded-full border-2 border-white shadow flex items-center justify-center text-[9px] font-black text-white z-20" style={{backgroundColor: p.color}}>G{idx+1}</div>);
+                    if (p.requiredCells.some(cp => cp.r === r && cp.c === c)) els.push(<div key={`cp-${idx}`} className="w-4 h-4 rotate-45 border border-white shadow z-20" style={{backgroundColor: p.color}} />);
+                });
+                const warpIdx = warps.findIndex(w => (w.a.r === r && w.a.c === c) || (w.b.r === r && w.b.c === c));
+                if (warpIdx !== -1) els.push(<div key={`w-${warpIdx}`} className="w-6 h-6 rounded bg-cyan-500 border-2 border-white text-[9px] text-white font-black flex items-center justify-center z-20">W{warpIdx+1}</div>);
+                if (pendingWarp?.r === r && pendingWarp?.c === c) els.push(<div key="pw" className="w-6 h-6 rounded bg-cyan-700 animate-pulse z-20" />);
+                return els;
+            };
+
+            const renderPath = (pairId) => {
+                const solList = solutions[pairId]; if (!solList || solList.length === 0) return null;
+                const path = solList[0]; const pair = pairs.find(p => p.id === pairId);
+                return (<svg className="absolute inset-0 pointer-events-none w-full h-full overflow-visible" style={{zIndex: 30}}><polyline points={path.map(p => `${p.c * 32 + 16},${p.r * 32 + 16}`).join(' ')} fill="none" stroke={pair.color} strokeWidth="4" strokeLinecap="round" strokeLinejoin="round" opacity="0.8"/></svg>);
+            };
+
+            return (
+                <div className="flex flex-col h-screen bg-slate-100 text-slate-900 font-sans overflow-hidden select-none no-select">
+                    <header className="bg-white border-b px-4 py-2 flex items-center justify-between shadow-sm z-50">
+                        <div className="flex items-center gap-3">
+                            <button onClick={() => setIsSidebarOpen(!isSidebarOpen)} className="p-1.5 hover:bg-slate-100 rounded-md text-slate-500 transition-colors">
+                                <Icon name={isSidebarOpen ? "ChevronLeft" : "ChevronRight"} size={20} />
+                            </button>
+                            <div className="flex items-center gap-2 pr-4 border-r">
+                                <div className="bg-indigo-600 p-1.5 rounded-lg text-white shadow-sm"><Icon name="Grid" size={18} /></div>
+                                <h1 className="text-md font-bold tracking-tight">Maze Architect Pro</h1>
+                            </div>
+                            <div className="flex gap-1 bg-slate-50 p-1 rounded-md border">
+                                <button onClick={undo} disabled={historyIdx <= 0} className="p-1.5 hover:bg-white rounded disabled:opacity-20 transition-opacity"><Icon name="Undo2" size={16}/></button>
+                                <button onClick={redo} disabled={historyIdx >= history.length - 1} className="p-1.5 hover:bg-white rounded disabled:opacity-20 transition-opacity"><Icon name="Redo2" size={16}/></button>
+                            </div>
+                            <div className="flex gap-1 bg-slate-50 p-1 rounded-md border text-[10px] font-bold uppercase">
+                                <button onClick={() => { const data = JSON.stringify({ grid, hWalls, vWalls, pairs, warps, dim }); const blob = new Blob([data], { type: 'application/json' }); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = 'maze.json'; a.click(); }} className="p-1.5 hover:bg-white rounded flex items-center gap-1"><Icon name="Save" size={14}/> 保存</button>
+                                <label className="p-1.5 hover:bg-white rounded flex items-center gap-1 cursor-pointer"><Icon name="FileUp" size={14}/> 開く<input type="file" className="hidden" accept=".json" onChange={(e) => { const f = e.target.files[0]; if (!f) return; const r = new FileReader(); r.onload = (ev) => { try { const d = JSON.parse(ev.target.result); setGrid(d.grid); setHWalls(d.hWalls); setVWalls(d.vWalls); setPairs(d.pairs); setWarps(d.warps); setDim(d.dim); setTargetDim(d.dim); saveHistory(d); } catch(err) { setStatusMsg("Error"); } }; r.readAsText(f); }} /></label>
+                                <button onClick={() => resetMaze(dim.w, dim.h)} className="p-1.5 hover:bg-white rounded text-red-500 flex items-center gap-1"><Icon name="RefreshCcw" size={14}/> 盤面消去</button>
+                            </div>
+                        </div>
+                        <div className="flex items-center gap-3">
+                            <div className="flex bg-slate-50 p-1 rounded-md border text-[10px] font-black uppercase tracking-wider">
+                                {[{id:TOOLS.CURSOR,icon:"MousePointer2",label:'選択'},{id:TOOLS.CELL_WALL,icon:"Square",label:'マス壁'},{id:TOOLS.BORDER_WALL,icon:"Lock",label:'境界壁'}].map(t => (
+                                    <button key={t.id} onClick={() => { setActiveTool(t.id); setSelection(null); }} className={`p-1.5 rounded flex items-center gap-1 px-3 transition-all ${activeTool === t.id ? 'bg-white shadow-sm text-indigo-600' : 'text-slate-400 hover:text-slate-600'}`}>
+                                        <Icon name={t.icon} size={14} /><span className="ml-1">{t.label}</span>
+                                    </button>
+                                ))}
+                            </div>
+                            <button onClick={() => { const s = new MazeSolver(grid, hWalls, vWalls, pairs, warps, solverOptions); const r = s.solve(); setSolutions(r); setStatusMsg(Object.keys(r).length > 0 ? '求解が完了しました。' : '開始/終了地点を配置してください。'); }} className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 text-white px-5 py-2 rounded-lg font-bold transition-all shadow-md active:scale-95 text-[12px]">
+                                <Icon name="Play" size={14} fill="white" /> 求解実行
+                            </button>
+                        </div>
+                    </header>
+
+                    <div className="flex flex-1 overflow-hidden">
+                        <aside className={`bg-white border-r flex flex-col overflow-y-auto transition-all duration-300 z-40 shadow-sm ${isSidebarOpen ? 'w-80' : 'w-0'}`}>
+                            <div className="min-w-[320px]">
+                                <div className="p-4 border-b bg-slate-50/50">
+                                    <h2 className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-3">アイテム配置</h2>
+                                    <div className="grid grid-cols-2 gap-2">
+                                        {[{id:TOOLS.START,l:'スタート',c:'bg-green-500',dot:true},{id:TOOLS.GOAL,l:'ゴール',c:'bg-red-500',dot:true},{id:TOOLS.CHECKPOINT,l:'必須マス',c:'bg-yellow-400',dia:true},{id:TOOLS.WARP,l:'ワープ',c:'bg-cyan-500',sq:true}].map(t => (
+                                            <button key={t.id} onClick={() => { setActiveTool(t.id); setSelection(null); }} className={`flex items-center gap-2 p-2.5 rounded-lg border text-[11px] font-bold transition-all ${activeTool === t.id ? 'bg-indigo-50 border-indigo-200 text-indigo-700 shadow-sm' : 'bg-white hover:bg-slate-50'}`}>
+                                                <div className={`w-3 h-3 ${t.c} ${t.dot ? 'rounded-full' : t.dia ? 'rotate-45' : 'rounded-sm'} shadow-sm`} />{t.l}
+                                            </button>
+                                        ))}
+                                    </div>
+                                </div>
+                                <div className="p-4 flex-1">
+                                    <div className="flex items-center justify-between mb-4">
+                                        <h2 className="text-[10px] font-black text-slate-400 uppercase tracking-widest">求解ペア ({pairs.length})</h2>
+                                        <button onClick={() => { const n = [...pairs, { id: Date.now(), start: null, goal: null, requiredCells: [], color: COLORS[pairs.length % COLORS.length], mode: PATH_MODES.SHORTEST, moveRule: MOVE_RULES.FREE }]; setPairs(n); setActivePairIdx(n.length-1); }} className="bg-indigo-50 text-indigo-600 hover:bg-indigo-100 p-1.5 rounded-md transition-colors"><Icon name="Plus" size={16} /></button>
+                                    </div>
+                                    <div className="space-y-2.5">
+                                        {pairs.map((p, i) => (
+                                            <div key={p.id} onClick={() => setActivePairIdx(i)} className={`relative p-3 rounded-xl border-2 transition-all cursor-pointer ${activePairIdx === i ? 'border-indigo-400 bg-indigo-50/10 shadow-sm' : 'border-slate-100 bg-slate-50 hover:bg-slate-100'}`}>
+                                                <div className="flex items-center justify-between mb-2.5">
+                                                    <div className="flex items-center gap-2"><div className="w-2.5 h-2.5 rounded-full" style={{backgroundColor:p.color}}/><span className="font-black text-[10px] uppercase">ペア {i+1}</span></div>
+                                                    {pairs.length > 1 && <button onClick={(e) => {e.stopPropagation(); const n=pairs.filter((_, idx)=>idx!==i); setPairs(n); setActivePairIdx(0);}} className="text-slate-300 hover:text-red-500 transition-colors"><Icon name="Trash2" size={12}/></button>}
+                                                </div>
+                                                <div className="space-y-2">
+                                                    <select className="w-full text-[11px] p-1.5 rounded border bg-white font-bold" value={p.moveRule} onChange={(e)=>{const n=[...pairs]; n[i].moveRule=e.target.value; setPairs(n);}}>{Object.values(MOVE_RULES).map(v=><option key={v} value={v}>{v}</option>)}</select>
+                                                    <select className="w-full text-[11px] p-1.5 rounded border bg-white font-bold" value={p.mode} onChange={(e)=>{const n=[...pairs]; n[i].mode=e.target.value; setPairs(n);}}>{Object.values(PATH_MODES).map(v=><option key={v} value={v}>{v}</option>)}</select>
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+                                <div className="p-4 border-t bg-slate-50 space-y-4">
+                                    <div className="flex items-center justify-between px-1"><span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">探索上限</span><input type="number" className="w-14 text-xs font-bold border rounded p-1 text-center bg-white" value={solverOptions.maxSolutions} onChange={(e)=>setSolverOptions({...solverOptions, maxSolutions: parseInt(e.target.value) || 1})}/></div>
+                                    <div className="pt-2 border-t text-[10px] font-black text-slate-400 uppercase tracking-widest">
+                                        <h2 className="mb-3">盤面設定</h2>
+                                        <div className="flex items-center gap-2 mb-3">
+                                            <input type="number" className="w-full text-xs border rounded p-1.5 text-center font-bold" value={targetDim.w} onChange={(e)=>setTargetDim({...targetDim, w: parseInt(e.target.value)||1})}/><span className="text-slate-300">×</span><input type="number" className="w-full text-xs border rounded p-1.5 text-center font-bold" value={targetDim.h} onChange={(e)=>setTargetDim({...targetDim, h: parseInt(e.target.value)||1})}/>
+                                        </div>
+                                        <button onClick={applyResize} className="w-full py-2 bg-slate-800 hover:bg-black text-white rounded-lg transition-all tracking-wider">盤面サイズを適用</button>
+                                    </div>
+                                </div>
+                            </div>
+                        </aside>
+
+                        <main ref={workspaceRef} className="flex-1 relative overflow-hidden bg-slate-200" onWheel={handleWheel} onMouseDown={handleWorkspaceMouseDown} onMouseMove={handleWorkspaceMouseMove} onMouseUp={handleWorkspaceMouseUp}>
+                            <div className="absolute origin-center transition-transform duration-75 ease-out" style={{ transform: `translate(${viewTransform.x}px, ${viewTransform.y}px) scale(${viewTransform.scale})`, top: '15%', left: '20%' }}>
+                                <div ref={gridRef} className="relative shadow-2xl bg-white p-4 border border-slate-300 rounded-sm"
+                                    onMouseDown={(e) => {
+                                        const rct = gridRef.current.getBoundingClientRect();
+                                        const c = Math.floor((e.clientX - rct.left - 16) / (32 * viewTransform.scale));
+                                        const r = Math.floor((e.clientY - rct.top - 16) / (32 * viewTransform.scale));
+                                        if (e.button === 1) { setIsDragging(true); setDragMode('delete_all'); handleCellInteraction(r, c, true); return; }
+                                        if (e.shiftKey) { setActiveTool(TOOLS.SELECT); setSelection({ r1: r, c1: c, r2: r, c2: c }); setIsSelecting(true); return; }
+                                        if (activeTool !== TOOLS.CURSOR) { setIsDragging(true); handleCellInteraction(r, c, true); }
+                                    }}
+                                    onMouseMove={(e) => {
+                                        const rct = gridRef.current.getBoundingClientRect();
+                                        const c = Math.floor((e.clientX - rct.left - 16) / (32 * viewTransform.scale));
+                                        const r = Math.floor((e.clientY - rct.top - 16) / (32 * viewTransform.scale));
+                                        if (isSelecting) setSelection(prev => ({ ...prev, r2: r, c2: c }));
+                                        else if (isDragging) handleCellInteraction(r, c);
+                                    }}
+                                    onMouseUp={() => { if (isDragging || isSelecting) saveHistory(); setIsDragging(false); setIsSelecting(false); setDragMode(null); }}
+                                    onContextMenu={(e) => e.preventDefault()}
+                                >
+                                    <div className="relative inline-block border-2 border-slate-900">
+                                        {grid.map((row, r) => (
+                                            <div key={r} className="flex">
+                                                {row.map((cell, c) => (
+                                                    <div key={c} className={`w-8 h-8 border border-slate-100 relative flex items-center justify-center transition-colors ${cell.isWall ? 'bg-slate-800' : 'bg-white hover:bg-slate-50'} ${selection && (r >= Math.min(selection.r1, selection.r2) && r <= Math.max(selection.r1, selection.r2) && c >= Math.min(selection.c1, selection.c2) && c <= Math.max(selection.c1, selection.c2)) ? 'ring-2 ring-indigo-400 ring-inset bg-indigo-50/40' : ''}`}>
+                                                        {getCellContent(r, c)}
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        ))}
+                                        {hWalls.map((row, r) => row.map((isW, c) => (
+                                            <div key={`h-${r}-${c}`} className={`absolute h-1.5 z-40 transition-colors ${isW ? 'bg-red-600' : 'hover:bg-red-400/20'} ${activeTool === TOOLS.BORDER_WALL ? 'cursor-pointer' : 'pointer-events-none'}`} style={{ top: r * 32, left: c * 32, width: 32, transform: 'translateY(-50%)' }} onMouseDown={(e) => { if (activeTool === TOOLS.BORDER_WALL) { e.stopPropagation(); setIsDragging(true); handleWallInteraction('h', r, c, true); } }} onMouseEnter={() => isDragging && activeTool === TOOLS.BORDER_WALL && handleWallInteraction('h', r, c)}/>
+                                        )))}
+                                        {vWalls.map((row, r) => row.map((isW, c) => (
+                                            <div key={`v-${r}-${c}`} className={`absolute w-1.5 z-40 transition-colors ${isW ? 'bg-red-600' : 'hover:bg-red-400/20'} ${activeTool === TOOLS.BORDER_WALL ? 'cursor-pointer' : 'pointer-events-none'}`} style={{ left: c * 32, top: r * 32, height: 32, transform: 'translateX(-50%)' }} onMouseDown={(e) => { if (activeTool === TOOLS.BORDER_WALL) { e.stopPropagation(); setIsDragging(true); handleWallInteraction('v', r, c, true); } }} onMouseEnter={() => isDragging && activeTool === TOOLS.BORDER_WALL && handleWallInteraction('v', r, c)}/>
+                                        )))}
+                                        <svg className="absolute inset-0 pointer-events-none w-full h-full overflow-visible z-10 opacity-30">{warps.map(w => <line key={w.id} x1={w.a.c*32+16} y1={w.a.r*32+16} x2={w.b.c*32+16} y2={w.b.r*32+16} stroke="cyan" strokeWidth="1.5" strokeDasharray="4 2" />)}</svg>
+                                        {Object.keys(solutions).map(pid => renderPath(Number(pid)))}
+                                    </div>
+                                </div>
+                            </div>
+                            {selection && !isSelecting && (
+                                <div className="fixed bottom-12 left-1/2 -translate-x-1/2 bg-white rounded-xl shadow-2xl border p-1.5 flex items-center gap-1 z-50 text-[11px] font-bold uppercase">
+                                    <button onClick={() => { 
+                                        const [minR, maxR] = [Math.min(selection.r1, selection.r2), Math.max(selection.r1, selection.r2)];
+                                        const [minC, maxC] = [Math.min(selection.c1, selection.c2), Math.max(selection.c1, selection.c2)];
+                                        const ng = [...grid.map(row => [...row])]; const sub = []; for(let r=minR; r<=maxR; r++) { const row = []; for(let c=minC; c<=maxC; c++) row.push({...grid[r][c]}); sub.push(row); }
+                                        for(let i=0; i<sub.length; i++) for(let j=0; j<sub[i].length; j++) { const tr = minR + j, tc = maxC - i; if(tr <= maxR && tc >= minC) ng[tr][tc] = sub[i][j]; }
+                                        setGrid(ng); saveHistory(); 
+                                    }} className="p-2 hover:bg-slate-100 rounded-lg text-indigo-600 flex items-center gap-1"><Icon name="RotateCw" size={14}/>回転</button>
+                                    <button onClick={() => {
+                                        const [minR, maxR] = [Math.min(selection.r1, selection.r2), Math.max(selection.r1, selection.r2)];
+                                        const [minC, maxC] = [Math.min(selection.c1, selection.c2), Math.max(selection.c1, selection.c2)];
+                                        const ng = [...grid.map(row => [...row])];
+                                        for(let r=minR; r<=maxR; r++) for(let c=minC; c<=minC+(maxC-minC)/2; c++){ const tc=maxC-(c-minC); const temp=ng[r][c]; ng[r][c]=ng[r][tc]; ng[r][tc]=temp; }
+                                        setGrid(ng); saveHistory();
+                                    }} className="p-2 hover:bg-slate-100 rounded-lg text-indigo-600 flex items-center gap-1"><Icon name="FlipHorizontal" size={14}/>反転</button>
+                                    <button onClick={() => {
+                                        const [minR, maxR] = [Math.min(selection.r1, selection.r2), Math.max(selection.r1, selection.r2)];
+                                        const [minC, maxC] = [Math.min(selection.c1, selection.c2), Math.max(selection.c1, selection.c2)];
+                                        const ng = [...grid.map(row => [...row])]; const np = [...pairs]; const nw = [...warps];
+                                        for(let r=minR; r<=maxR; r++) for(let c=minC; c<=maxC; c++){ ng[r][c].isWall=false; clearCellAttributes(r,c,np,nw); }
+                                        setGrid(ng); setPairs(np); setWarps(nw); saveHistory();
+                                    }} className="p-2 hover:bg-red-50 rounded-lg text-red-600 flex items-center gap-1"><Icon name="Trash2" size={14}/>消去</button>
+                                    <button onClick={() => setSelection(null)} className="p-2 hover:bg-slate-100 rounded-lg text-slate-400"><Icon name="X" size={16}/></button>
+                                </div>
+                            )}
+                        </main>
+
+                        <footer className="bg-white border-t px-4 py-1 flex items-center justify-between z-50 shadow-[0_-1px_5px_rgba(0,0,0,0.05)] text-[10px] font-black uppercase tracking-widest text-slate-400">
+                            <div className="flex items-center gap-4">
+                                <div className="flex items-center gap-1.5 text-slate-500 border-r pr-4"><div className="w-1.5 h-1.5 rounded-full bg-indigo-500" />TOOL: {activeTool.toUpperCase()}</div>
+                                <div className="flex items-center gap-2 overflow-hidden text-ellipsis whitespace-nowrap"><Icon name="Info" size={12}/>{statusMsg || 'ホイール:移動 / Ctrl+ホイール:ズーム / 背景ドラッグ:移動 / Shift+ドラッグ:範囲選択'}</div>
+                            </div>
+                            <div className="flex items-center gap-3 tracking-tighter"><span>ZOOM: {Math.round(viewTransform.scale * 100)}%</span><span className="opacity-50">|</span><span>Maze Architect Pro v2.1</span></div>
+                        </footer>
+                    </div>
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
