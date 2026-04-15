@@ -45,6 +45,34 @@
         }
         .context-menu-item:hover { background: #f1f5f9; color: #4f46e5; }
         .context-menu-divider { height: 1px; background: #e2e8f0; margin: 4px 0; }
+
+        /* Toggle Switch */
+        .switch {
+            position: relative;
+            display: inline-block;
+            width: 34px;
+            height: 20px;
+        }
+        .switch input { opacity: 0; width: 0; height: 0; }
+        .slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background-color: #cbd5e1;
+            transition: .4s;
+            border-radius: 20px;
+        }
+        .slider:before {
+            position: absolute;
+            content: "";
+            height: 14px; width: 14px;
+            left: 3px; bottom: 3px;
+            background-color: white;
+            transition: .4s;
+            border-radius: 50%;
+        }
+        input:checked + .slider { background-color: #4f46e5; }
+        input:checked + .slider:before { transform: translateX(14px); }
     </style>
 </head>
 <body>
@@ -218,7 +246,7 @@
             const [warps, setWarps] = useState([]);
             const [solverOptions, setSolverOptions] = useState({ maxSolutions: 5 });
             const [solutions, setSolutions] = useState({});
-            const [statusMsg, setStatusMsg] = useState('');
+            const [statusMsg, setStatusMsg] = useState('盤面を右クリックしてスタート・ゴールを設定してください');
             const [isSidebarOpen, setIsSidebarOpen] = useState(true);
             const [dim, setDim] = useState({ w: 5, h: 5 });
             const [targetDim, setTargetDim] = useState({ w: 5, h: 5 });
@@ -232,6 +260,7 @@
             const [dragMode, setDragMode] = useState(null); // 'add' | 'remove'
             const [pendingWarp, setPendingWarp] = useState(null);
             const [contextMenu, setContextMenu] = useState(null); // { x, y, r, c }
+            const [isAutoSolve, setIsAutoSolve] = useState(false);
 
             const gridRef = useRef(null);
             const workspaceRef = useRef(null);
@@ -247,7 +276,37 @@
                 setHistoryIdx(newHistory.length - 1);
             }, [grid, hWalls, vWalls, pairs, warps, dim, history, historyIdx]);
 
+            const solveMaze = useCallback(() => {
+                const s = new MazeSolver(grid, hWalls, vWalls, pairs, warps, solverOptions);
+                const r = s.solve();
+                setSolutions(r);
+                return r;
+            }, [grid, hWalls, vWalls, pairs, warps, solverOptions]);
+
+            const resetMaze = useCallback((w, h, skipHistory = false) => {
+                const newGrid = Array(h).fill(0).map(() => Array(w).fill(0).map(() => ({ isWall: false })));
+                const newHWalls = Array(h + 1).fill(0).map(() => Array(w).fill(false));
+                const newVWalls = Array(h).fill(0).map(() => Array(w + 1).fill(false));
+                const newPairs = [{ id: Date.now(), start: null, goal: null, requiredCells: [], color: COLORS[0], mode: PATH_MODES.SHORTEST, moveRule: MOVE_RULES.FREE }];
+                setGrid(newGrid); setHWalls(newHWalls); setVWalls(newVWalls); setPairs(newPairs); setWarps([]);
+                setSolutions({}); setDim({ w, h }); setTargetDim({ w, h }); setPendingWarp(null);
+                if (!skipHistory) {
+                    saveHistory({ grid: newGrid, hWalls: newHWalls, vWalls: newVWalls, pairs: newPairs, warps: [], dim: { w, h } });
+                } else {
+                    setHistory([JSON.stringify({ grid: newGrid, hWalls: newHWalls, vWalls: newVWalls, pairs: newPairs, warps: [], dim: { w, h } })]);
+                    setHistoryIdx(0);
+                }
+                setStatusMsg("リセットされました");
+            }, [saveHistory]);
+
             useEffect(() => { resetMaze(5, 5, true); }, []);
+
+            // Auto-solve trigger
+            useEffect(() => {
+                if (isAutoSolve && grid.length > 0) {
+                    solveMaze();
+                }
+            }, [grid, hWalls, vWalls, pairs, warps, solverOptions, isAutoSolve, solveMaze]);
 
             const undo = () => {
                 if (historyIdx > 0) {
@@ -265,17 +324,6 @@
                     setPairs(nextState.pairs); setWarps(nextState.warps); setDim(nextState.dim); setTargetDim(nextState.dim);
                     setHistoryIdx(historyIdx + 1); setSolutions({});
                 }
-            };
-
-            const resetMaze = (w, h, skipHistory = false) => {
-                const newGrid = Array(h).fill(0).map(() => Array(w).fill(0).map(() => ({ isWall: false })));
-                const newHWalls = Array(h + 1).fill(0).map(() => Array(w).fill(false));
-                const newVWalls = Array(h).fill(0).map(() => Array(w + 1).fill(false));
-                const newPairs = [{ id: Date.now(), start: null, goal: null, requiredCells: [], color: COLORS[0], mode: PATH_MODES.SHORTEST, moveRule: MOVE_RULES.FREE }];
-                setGrid(newGrid); setHWalls(newHWalls); setVWalls(newVWalls); setPairs(newPairs); setWarps([]);
-                setSolutions({}); setDim({ w, h }); setTargetDim({ w, h }); setViewTransform({ x: 100, y: 100, scale: 1.5 });
-                if (!skipHistory) saveHistory({ grid: newGrid, hWalls: newHWalls, vWalls: newVWalls, pairs: newPairs, warps: [], dim: { w, h } });
-                else { setHistory([JSON.stringify({ grid: newGrid, hWalls: newHWalls, vWalls: newVWalls, pairs: newPairs, warps: [], dim: { w, h } })]); setHistoryIdx(0); }
             };
 
             const applyResize = () => {
@@ -301,11 +349,14 @@
                     if (p.goal?.r === r && p.goal?.c === c) p.goal = null;
                     p.requiredCells = p.requiredCells.filter(cp => cp.r !== r || cp.c !== c);
                 });
-                const warpIdx = updatedWarps.findIndex(w => (w.a.r === r && w.a.c === c) || (w.b.r === r && w.b.c === c));
-                if (warpIdx !== -1) updatedWarps.splice(warpIdx, 1);
+                for (let i = updatedWarps.length - 1; i >= 0; i--) {
+                    const w = updatedWarps[i];
+                    if ((w.a.r === r && w.a.c === c) || (w.b.r === r && w.b.c === c)) {
+                        updatedWarps.splice(i, 1);
+                    }
+                }
             };
 
-            // --- Handlers ---
             const handleCellWall = (r, c, initial = false) => {
                 if (r < 0 || r >= dim.h || c < 0 || c >= dim.w || isOccupied(r, c)) return;
                 const newGrid = [...grid.map(row => [...row])];
@@ -344,39 +395,37 @@
                 const nextWarps = [...warps];
                 const activePair = nextPairs[activePairIdx];
 
-                // Remove existing wall and any attribute at this position
-                nextGrid[r][c].isWall = false;
-                clearCellAttributes(r, c, nextPairs, nextWarps);
-
-                if (type === 'start') {
-                    activePair.start = { r, c };
-                } else if (type === 'goal') {
-                    activePair.goal = { r, c };
-                } else if (type === 'cp') {
-                    activePair.requiredCells.push({ r, c });
-                } else if (type === 'warp') {
-                    if (!pendingWarp) { 
-                        setPendingWarp({ r, c }); 
-                        setStatusMsg("ワープの出口を選択してください (右クリックメニューから)"); 
+                if (type === 'warp') {
+                    if (!pendingWarp) {
+                        setPendingWarp({ r, c });
+                        setStatusMsg("ワープの出口（2点目）を選択してください");
                     } else {
                         if (pendingWarp.r === r && pendingWarp.c === c) {
                             setPendingWarp(null);
                         } else {
                             clearCellAttributes(pendingWarp.r, pendingWarp.c, nextPairs, nextWarps);
+                            clearCellAttributes(r, c, nextPairs, nextWarps);
                             nextGrid[pendingWarp.r][pendingWarp.c].isWall = false;
-                            nextWarps.push({ a: pendingWarp, b: { r, c }, id: Date.now() });
+                            nextGrid[r][c].isWall = false;
+                            nextWarps.push({ a: { ...pendingWarp }, b: { r, c }, id: Date.now() });
                             setPendingWarp(null);
-                            setStatusMsg("ワープの接続完了。");
+                            setStatusMsg("ワープ接続完了");
                         }
                     }
+                } else {
+                    nextGrid[r][c].isWall = false;
+                    clearCellAttributes(r, c, nextPairs, nextWarps);
+
+                    if (type === 'start') activePair.start = { r, c };
+                    else if (type === 'goal') activePair.goal = { r, c };
+                    else if (type === 'cp') activePair.requiredCells.push({ r, c });
+                    setStatusMsg("属性を設定しました");
                 }
 
                 setGrid(nextGrid);
                 setPairs(nextPairs);
                 setWarps(nextWarps);
                 setContextMenu(null);
-                
-                // Manually trigger history save with the latest computed data
                 saveHistory({ grid: nextGrid, hWalls, vWalls, pairs: nextPairs, warps: nextWarps, dim });
             };
 
@@ -387,22 +436,23 @@
                 setPairs(nextPairs);
                 setWarps(nextWarps);
                 setContextMenu(null);
+                setStatusMsg("設定を解除しました");
                 saveHistory({ grid, hWalls, vWalls, pairs: nextPairs, warps: nextWarps, dim });
             };
 
-            // --- Window Events ---
+            // --- UI Events ---
             const handleWheel = (e) => {
-                e.preventDefault();
                 const scaleDelta = e.deltaY > 0 ? 0.9 : 1.1;
                 const newScale = Math.min(Math.max(viewTransform.scale * scaleDelta, 0.2), 4);
                 setViewTransform(prev => ({ ...prev, scale: newScale }));
             };
 
             const handleMouseDown = (e) => {
-                setContextMenu(null);
-                if (e.button === 1) { // Middle click pan
+                if (e.button === 1) { 
                     setIsPanning(true);
                     setPanStart({ x: e.clientX - viewTransform.x, y: e.clientY - viewTransform.y });
+                } else if (e.button === 0) {
+                    setContextMenu(null); // Click to close context menu
                 }
             };
 
@@ -422,7 +472,6 @@
                 setContextMenu({ x: e.clientX, y: e.clientY, r, c });
             };
 
-            // --- Rendering ---
             const getCellContent = (r, c) => {
                 const els = [];
                 pairs.forEach((p, idx) => {
@@ -439,7 +488,19 @@
             const renderPath = (pairId) => {
                 const solList = solutions[pairId]; if (!solList || solList.length === 0) return null;
                 const path = solList[0]; const pair = pairs.find(p => p.id === pairId);
-                return (<svg className="absolute inset-0 pointer-events-none w-full h-full overflow-visible" style={{zIndex: 30}}><polyline points={path.map(p => `${p.c * CELL_SIZE + CELL_SIZE/2},${p.r * CELL_SIZE + CELL_SIZE/2}`).join(' ')} fill="none" stroke={pair.color} strokeWidth="6" strokeLinecap="round" strokeLinejoin="round" opacity="0.8"/></svg>);
+                return (<svg key={pairId} className="absolute inset-0 pointer-events-none w-full h-full overflow-visible" style={{zIndex: 30}}><polyline points={path.map(p => `${p.c * CELL_SIZE + CELL_SIZE/2},${p.r * CELL_SIZE + CELL_SIZE/2}`).join(' ')} fill="none" stroke={pair.color} strokeWidth="6" strokeLinecap="round" strokeLinejoin="round" opacity="0.8"/></svg>);
+            };
+
+            const getSolutionCountText = (pairId) => {
+                const sol = solutions[pairId];
+                if (!sol) return '未計算';
+                if (sol.length === 0) return '0';
+                const pair = pairs.find(p => p.id === pairId);
+                // SHORTEST mode is BFS, always 1 path if found
+                if (pair.mode === PATH_MODES.SHORTEST) return '1';
+                // Otherwise DFS count
+                if (sol.length >= solverOptions.maxSolutions) return `${solverOptions.maxSolutions}個以上`;
+                return sol.length.toString();
             };
 
             return (
@@ -460,7 +521,7 @@
                             </div>
                         </div>
                         <div className="flex items-center gap-3">
-                            <button onClick={() => { const s = new MazeSolver(grid, hWalls, vWalls, pairs, warps, solverOptions); const r = s.solve(); setSolutions(r); setStatusMsg(Object.keys(r).length > 0 ? '求解が完了しました' : '経路が見つかりません'); }} className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 text-white px-6 py-2 rounded-lg font-bold transition-all shadow-md active:scale-95 text-xs">
+                            <button onClick={solveMaze} className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 text-white px-6 py-2 rounded-lg font-bold transition-all shadow-md active:scale-95 text-xs">
                                 <Icon name="Play" size={14} fill="white" /> 求解実行
                             </button>
                         </div>
@@ -486,18 +547,38 @@
                                                     <select className="w-full text-[11px] p-2 rounded border bg-white font-bold cursor-pointer outline-none" value={p.moveRule} onChange={(e)=>{const n=[...pairs]; n[i].moveRule=e.target.value; setPairs(n);}}>{Object.values(MOVE_RULES).map(v=><option key={v} value={v}>{v}</option>)}</select>
                                                     <select className="w-full text-[11px] p-2 rounded border bg-white font-bold cursor-pointer outline-none" value={p.mode} onChange={(e)=>{const n=[...pairs]; n[i].mode=e.target.value; setPairs(n);}}>{Object.values(PATH_MODES).map(v=><option key={v} value={v}>{v}</option>)}</select>
                                                 </div>
+                                                <div className="mt-2.5 flex items-center justify-between border-t border-slate-200/50 pt-2">
+                                                    <span className="text-[9px] font-black text-slate-400 uppercase tracking-tight">見つかった解:</span>
+                                                    <span className="text-[10px] font-bold text-indigo-600">{getSolutionCountText(p.id)}</span>
+                                                </div>
                                             </div>
                                         ))}
                                     </div>
                                 </div>
                                 <div className="p-4 border-t bg-slate-50 space-y-4">
-                                    <div className="flex items-center justify-between px-1"><span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">探索上限</span><input type="number" className="w-16 text-xs font-bold border rounded p-1.5 text-center bg-white" value={solverOptions.maxSolutions} onChange={(e)=>setSolverOptions({...solverOptions, maxSolutions: parseInt(e.target.value) || 1})}/></div>
+                                    <div className="flex items-center justify-between px-1">
+                                        <div className="flex flex-col">
+                                            <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">常時求解</span>
+                                            <span className="text-[8px] text-slate-400 font-bold">盤面変更時に自動計算</span>
+                                        </div>
+                                        <label className="switch">
+                                            <input type="checkbox" checked={isAutoSolve} onChange={(e) => setIsAutoSolve(e.target.checked)} />
+                                            <span className="slider"></span>
+                                        </label>
+                                    </div>
+                                    <div className="flex items-center justify-between px-1 border-t pt-4">
+                                        <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">探索上限</span>
+                                        <input type="number" className="w-16 text-xs font-bold border rounded p-1.5 text-center bg-white" value={solverOptions.maxSolutions} onChange={(e)=>setSolverOptions({...solverOptions, maxSolutions: parseInt(e.target.value) || 1})}/>
+                                    </div>
                                     <div className="pt-2 border-t text-[10px] font-black text-slate-400 uppercase tracking-widest">
                                         <h2 className="mb-3">盤面サイズ変更</h2>
                                         <div className="flex items-center gap-2 mb-3">
                                             <input type="number" className="w-full text-xs border rounded p-2 text-center font-bold" value={targetDim.w} onChange={(e)=>setTargetDim({...targetDim, w: parseInt(e.target.value)||1})}/><span className="text-slate-300 font-bold">×</span><input type="number" className="w-full text-xs border rounded p-2 text-center font-bold" value={targetDim.h} onChange={(e)=>setTargetDim({...targetDim, h: parseInt(e.target.value)||1})}/>
                                         </div>
-                                        <button onClick={applyResize} className="w-full py-2.5 bg-slate-800 hover:bg-black text-white rounded-lg transition-all tracking-wider font-bold">適用する</button>
+                                        <div className="flex gap-2">
+                                            <button onClick={applyResize} className="flex-1 py-2.5 bg-slate-800 hover:bg-black text-white rounded-lg transition-all tracking-wider font-bold">適用する</button>
+                                            <button onClick={() => resetMaze(dim.w, dim.h)} title="盤面を全クリア" className="w-12 py-2.5 bg-red-100 hover:bg-red-200 text-red-600 rounded-lg transition-all flex items-center justify-center border border-red-200 shadow-sm"><Icon name="RotateCcw" size={16}/></button>
+                                        </div>
                                     </div>
                                     <div className="flex flex-col gap-2 border-t pt-4 pb-2">
                                         <button onClick={() => { const data = JSON.stringify({ grid, hWalls, vWalls, pairs, warps, dim }); const blob = new Blob([data], { type: 'application/json' }); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = 'maze.json'; a.click(); }} className="w-full py-2 bg-white border border-indigo-200 text-indigo-700 rounded-lg text-[11px] font-black uppercase hover:bg-indigo-50 transition-all flex items-center justify-center gap-2 shadow-sm"><Icon name="Save" size={14}/> ファイル保存</button>
@@ -582,18 +663,22 @@
 
                             {/* Custom Right-Click Menu */}
                             {contextMenu && (
-                                <div className="context-menu" style={{ left: contextMenu.x, top: contextMenu.y }}>
+                                <div 
+                                    className="context-menu" 
+                                    style={{ left: contextMenu.x, top: contextMenu.y }}
+                                    onMouseDown={(e) => e.stopPropagation()} // Prevent clicking on menu from closing it via handleMouseDown
+                                >
                                     <div className="context-menu-item" onClick={() => setAttribute('start', contextMenu.r, contextMenu.c)}>
-                                        <div className="w-3 h-3 rounded-full bg-green-500 shadow-sm" /> スタート地点
+                                        <div className="w-3 h-3 rounded-full bg-green-500 shadow-sm" /> スタート地点に設定
                                     </div>
                                     <div className="context-menu-item" onClick={() => setAttribute('goal', contextMenu.r, contextMenu.c)}>
-                                        <div className="w-3 h-3 rounded-full bg-red-500 shadow-sm" /> ゴール地点
+                                        <div className="w-3 h-3 rounded-full bg-red-500 shadow-sm" /> ゴール地点に設定
                                     </div>
                                     <div className="context-menu-item" onClick={() => setAttribute('cp', contextMenu.r, contextMenu.c)}>
-                                        <div className="w-3 h-3 rotate-45 bg-yellow-400 shadow-sm" /> 必須マス (チェックポイント)
+                                        <div className="w-3 h-3 rotate-45 bg-yellow-400 shadow-sm" /> 必須マスに追加
                                     </div>
                                     <div className="context-menu-item" onClick={() => setAttribute('warp', contextMenu.r, contextMenu.c)}>
-                                        <div className="w-3 h-3 rounded bg-cyan-500 shadow-sm" /> ワープマス (2点設定)
+                                        <div className="w-3 h-3 rounded bg-cyan-500 shadow-sm" /> ワープマスを設定
                                     </div>
                                     <div className="context-menu-divider"></div>
                                     <div className="context-menu-item text-red-500" onClick={() => removeAllAttributes(contextMenu.r, contextMenu.c)}>
@@ -607,24 +692,18 @@
                         <footer className="absolute bottom-0 left-0 right-0 bg-indigo-900 text-white px-4 py-2 flex items-center justify-between z-50 shadow-lg text-[10px] font-black uppercase tracking-widest">
                             <div className="flex items-center gap-6">
                                 <div className="flex items-center gap-2">
-                                    <div className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
-                                    STATUS: READY
+                                    <div className={`w-1.5 h-1.5 rounded-full animate-pulse ${isAutoSolve ? 'bg-green-400' : 'bg-slate-400'}`} />
+                                    STATUS: {isAutoSolve ? 'AUTO-SOLVING' : statusMsg.toUpperCase()}
                                 </div>
                                 <div className="flex items-center gap-3 border-l border-indigo-700 pl-4 opacity-80">
                                     <Icon name="MousePointer2" size={12}/>
-                                    <span>左ドラッグ: 壁描画 | 中ドラッグ: 移動 | ホイール: ズーム | 右クリック: 属性設定</span>
+                                    <span>左ドラッグ: 壁描画 | 中ドラッグ: 移動 | 右クリック: 属性設定</span>
                                 </div>
-                                {statusMsg && (
-                                    <div className="flex items-center gap-2 border-l border-indigo-700 pl-4 text-yellow-300">
-                                        <Icon name="Info" size={12}/>
-                                        {statusMsg}
-                                    </div>
-                                )}
                             </div>
                             <div className="flex items-center gap-4 opacity-70 tracking-tighter">
                                 <span>SIZE: {dim.w}x{dim.h}</span>
                                 <span>ZOOM: {Math.round(viewTransform.scale * 100)}%</span>
-                                <span>v2.4 Stable</span>
+                                <span>v2.6 Stable</span>
                             </div>
                         </footer>
                     </div>
